@@ -8,3 +8,8 @@ wheels/
 
 # Virtual environments
 .venv
+
+# VS Code: keep shared project settings, ignore personal/machine-specific files
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
