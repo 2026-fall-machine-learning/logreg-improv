@@ -1,3 +1,4 @@
+import joblib
 from sklearn.datasets import load_breast_cancer
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
@@ -16,3 +17,7 @@ model = LogisticRegression(max_iter=5000)
 model.fit(X_train, y_train)
 
 print("Accuracy:", model.score(X_test, y_test))
+
+model_path = "bcancer_logreg.joblib"
+joblib.dump(model, model_path)
+print(f"Model saved to {model_path}")
