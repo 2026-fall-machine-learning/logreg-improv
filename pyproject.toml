@@ -7,5 +7,6 @@ requires-python = ">=3.12"
 dependencies = [
     "ipykernel>=7.4.0",
     "matplotlib>=3.11.2",
+    "python-fasthtml>=0.14.14",
     "scikit-learn>=1.9.1",
 ]
