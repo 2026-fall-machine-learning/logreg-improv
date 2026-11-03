@@ -8,3 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
+
+# MLflow tracking data (local runs, artifacts, sqlite db)
+mlruns/
+mlflow.db
