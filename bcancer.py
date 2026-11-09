@@ -30,6 +30,20 @@ mlflow.set_experiment("bcancer")
 # mlflow.log_param() calls needed for any of that.
 mlflow.sklearn.autolog()
 
+# Track whichever trained model gets the best held-out accuracy across *all*
+# runs below, so we save that one (not just whichever trained last) for
+# bcancer_app.py to serve.
+best_model = None
+best_run_name = None
+best_accuracy = -1.0
+
+
+def consider(run_name, candidate, accuracy):
+    global best_model, best_run_name, best_accuracy
+    if accuracy > best_accuracy:
+        best_model, best_run_name, best_accuracy = candidate, run_name, accuracy
+
+
 # --- Baseline: logistic regression (same model as before) ------------------
 with mlflow.start_run(run_name="logreg-baseline"):
     model = LogisticRegression(max_iter=5000)
@@ -38,50 +52,73 @@ with mlflow.start_run(run_name="logreg-baseline"):
     test_accuracy = model.score(X_test, y_test)
     mlflow.log_metric("test_accuracy", test_accuracy)
     print(f"[logreg-baseline] test accuracy: {test_accuracy:.4f}")
+    consider("logreg-baseline", model, test_accuracy)
 
-# keep serving the logistic regression model from bcancer_app.py unchanged
-joblib.dump(model, "bcancer_model.joblib")
-
-# --- Decision trees with different hyperparameters --------------------------
-# Hyperparameters are settings we choose *before* training (unlike the
-# weights/splits the model learns from data). For DecisionTreeClassifier,
-# these have the biggest effect on the classic overfitting-vs-underfitting
-# trade-off:
+# --- Decision trees: a more realistic hyperparameter search -----------------
+# Real tuning rarely changes one knob at a time - these configs combine
+# several hyperparameters at once, the way you'd actually set up a
+# DecisionTreeClassifier for this dataset:
 #
 # - max_depth: deepest the tree may grow. None = keep splitting until every
 #   leaf is pure -> can memorize the training set (overfit). Small values
-#   (e.g. 3) force a simple tree -> may underfit.
-# - min_samples_leaf: minimum number of training samples a leaf must contain.
-#   Higher values smooth the decision boundary and reduce overfitting.
-# - criterion: impurity measure used to pick each split ("gini" vs
-#   "entropy"/information gain). Usually a minor effect, but worth comparing.
+#   (3-6) keep it simple -> may underfit.
+# - min_samples_leaf / min_samples_split: minimum samples a leaf must contain,
+#   and minimum samples required before even considering a split. Together
+#   they control how much evidence the tree needs before it commits to a
+#   split - higher values smooth the decision boundary and fight overfitting.
+# - criterion: impurity measure used to score a split - "gini" vs "entropy"
+#   (information gain). Usually a small effect vs. the knobs above.
+# - ccp_alpha: cost-complexity pruning strength. 0.0 = no pruning; grow the
+#   tree first, then prune back any branch that doesn't improve accuracy by
+#   at least `ccp_alpha` - a more principled alternative to guessing
+#   max_depth up front.
+# - max_features: how many of the 30 features to consider at each split.
+#   "sqrt" only looks at a random subset per split (the trick random forests
+#   use internally), adding regularization; None considers all of them.
+# - class_weight: this dataset is mildly imbalanced (212 malignant vs. 357
+#   benign samples). "balanced" reweights the loss so the minority class
+#   (malignant) isn't under-prioritized just because it's less common.
 tree_configs = [
     {
-        "run_name": "tree-shallow",
-        "params": {"max_depth": 3},
-        "note": "max_depth=3 keeps the tree very simple - easy to interpret, "
-        "but likely to underfit.",
+        "run_name": "tree-shallow-balanced",
+        "params": {"max_depth": 4, "class_weight": "balanced"},
+        "note": "Shallow, interpretable tree with class_weight='balanced' "
+        "to avoid under-prioritizing the malignant class.",
     },
     {
-        "run_name": "tree-unrestricted",
-        "params": {"max_depth": None},
-        "note": "max_depth=None (the default) lets the tree grow until "
-        "leaves are pure - flexible, but prone to overfitting on 30 "
-        "features.",
+        "run_name": "tree-cost-complexity-pruned",
+        "params": {"max_depth": None, "ccp_alpha": 0.01},
+        "note": "Let the tree grow fully, then prune it back with "
+        "ccp_alpha - usually a better regularizer than a hand-picked "
+        "max_depth.",
     },
     {
-        "run_name": "tree-min-leaf-5",
-        "params": {"max_depth": None, "min_samples_leaf": 5},
-        "note": "min_samples_leaf=5 forces every leaf to cover at least 5 "
-        "training samples, reining in the overfitting from an unrestricted "
-        "depth.",
+        "run_name": "tree-conservative",
+        "params": {
+            "max_depth": 5,
+            "min_samples_leaf": 5,
+            "min_samples_split": 10,
+            "ccp_alpha": 0.005,
+        },
+        "note": "Stacks several mild regularizers together (depth cap + "
+        "leaf/split minimums + light pruning) - closer to what a cautious, "
+        "production-minded tuning pass looks like.",
     },
     {
-        "run_name": "tree-entropy",
-        "params": {"max_depth": 5, "criterion": "entropy"},
-        "note": "criterion='entropy' swaps the split-quality measure from "
-        "Gini impurity to information gain; results are usually close to "
-        "gini but worth comparing.",
+        "run_name": "tree-entropy-balanced",
+        "params": {
+            "max_depth": 6,
+            "criterion": "entropy",
+            "class_weight": "balanced",
+        },
+        "note": "Swaps in information gain instead of Gini impurity, "
+        "combined with class balancing.",
+    },
+    {
+        "run_name": "tree-random-feature-subset",
+        "params": {"max_depth": None, "max_features": "sqrt"},
+        "note": "Only considers a random sqrt(30)~=5 features per split, "
+        "adding randomness/regularization to a single tree.",
     },
 ]
 
@@ -97,5 +134,10 @@ for config in tree_configs:
         mlflow.log_metric("test_accuracy", test_accuracy)
         mlflow.set_tag("note", config["note"])
         print(f"  -> test accuracy: {test_accuracy:.4f}")
+        consider(config["run_name"], tree, test_accuracy)
 
-print("\nRun `uv run mlflow ui` and open http://127.0.0.1:5000 to compare all runs.")
+print(f"\nBest model: {best_run_name} (test accuracy: {best_accuracy:.4f})")
+joblib.dump(best_model, "bcancer_model.joblib")
+print("Saved best model to bcancer_model.joblib")
+
+print("Run `uv run mlflow ui` and open http://127.0.0.1:5000 to compare all runs.")
