@@ -1,3 +1,5 @@
+import itertools
+
 import joblib
 import mlflow
 import mlflow.sklearn
@@ -57,35 +59,75 @@ results.append(
     run_experiment("logistic-regression", LogisticRegression(**lr_params), lr_params)
 )
 
-# --- Decision trees with different hyperparameters ---
-# Hyperparameters are settings you choose *before* training (unlike the
-# learned coefficients) that control how the tree is built:
-tree_configs = [
-    # No constraints: the tree keeps splitting until every leaf is pure.
-    # On a small dataset (569 rows) this tends to overfit the training set.
-    ("tree-unconstrained", {}),
-    # max_depth: how many splits deep the tree can go from root to leaf.
-    # Shallow trees (3-5) are simpler/more interpretable and resist
-    # overfitting, usually at a small cost in accuracy.
-    ("tree-max_depth-3", {"max_depth": 3}),
-    ("tree-max_depth-5", {"max_depth": 5}),
-    # min_samples_leaf: minimum number of training samples allowed in a
-    # leaf. Raising it smooths the decision boundary by refusing to carve
-    # out tiny regions around a handful of noisy points.
-    ("tree-min_samples_leaf-5", {"max_depth": 5, "min_samples_leaf": 5}),
-    # min_samples_split: minimum samples a node must have before it's even
-    # allowed to split further - another lever against overfitting.
-    ("tree-min_samples_split-10", {"min_samples_split": 10}),
-    # criterion: the impurity measure used to pick the best split at each
-    # node. "gini" (default) and "entropy" (information gain, classic
-    # ID3/C4.5) usually produce similar trees.
-    ("tree-criterion-entropy", {"max_depth": 5, "criterion": "entropy"}),
+# --- Decision trees: a small but realistic grid search ---
+# In practice you rarely tune hyperparameters one at a time - you search
+# combinations, because their effects interact (e.g. a deep tree is much
+# less overfit-prone once min_samples_leaf is also raised). This grid
+# covers the knobs that matter most for a DecisionTreeClassifier:
+tree_param_grid = {
+    # How many splits deep the tree may grow from root to leaf.
+    # None = unlimited (grow until leaves are pure or tiny) - the classic
+    # way a decision tree overfits.
+    "max_depth": [3, 5, 8, None],
+    # Minimum samples required in a leaf. Raising this smooths the
+    # decision boundary by refusing to carve out tiny regions around a
+    # handful of (possibly noisy) training points.
+    "min_samples_leaf": [1, 5, 10],
+    # Impurity measure used to pick the best split at each node. "gini" is
+    # the scikit-learn default; "entropy" is the information-gain
+    # criterion from classic ID3/C4.5. They usually agree but not always.
+    "criterion": ["gini", "entropy"],
+}
+
+tree_param_combos = [
+    dict(zip(tree_param_grid.keys(), values))
+    for values in itertools.product(*tree_param_grid.values())
 ]
 
-for name, params in tree_configs:
+
+def tree_run_name(params: dict) -> str:
+    depth = params["max_depth"] if params["max_depth"] is not None else "none"
+    return f"tree_depth={depth}_leaf={params['min_samples_leaf']}_crit={params['criterion']}"
+
+
+for params in tree_param_combos:
     results.append(
-        run_experiment(name, DecisionTreeClassifier(random_state=42, **params), params)
+        run_experiment(
+            tree_run_name(params),
+            DecisionTreeClassifier(random_state=42, **params),
+            params,
+        )
     )
+
+# --- A couple of extra, less commonly-grid-searched hyperparameters ---
+# These interact oddly enough with the grid above (e.g. pruning after an
+# unlimited max_depth) that they're usually explored separately rather
+# than as another axis of the main grid.
+results.append(
+    run_experiment(
+        "tree_ccp_alpha-pruned",
+        # ccp_alpha: cost-complexity pruning. After growing, the tree
+        # prunes back any subtree whose complexity isn't "worth" the
+        # impurity reduction it buys - a principled alternative/complement
+        # to max_depth for controlling overfitting. 0.0 (default) = no
+        # pruning.
+        DecisionTreeClassifier(random_state=42, ccp_alpha=0.01),
+        {"ccp_alpha": 0.01},
+    )
+)
+results.append(
+    run_experiment(
+        "tree_class_weight-balanced",
+        # class_weight="balanced": reweights classes inversely to their
+        # frequency. The breast cancer dataset is mildly imbalanced
+        # (~63% benign / 37% malignant); this matters more on imbalanced
+        # datasets where you care about not missing the minority class.
+        DecisionTreeClassifier(
+            random_state=42, max_depth=5, class_weight="balanced"
+        ),
+        {"max_depth": 5, "class_weight": "balanced"},
+    )
+)
 
 best_model, best_metrics = max(results, key=lambda r: r[1]["accuracy"])
 print(f"\nBest model accuracy: {best_metrics['accuracy']:.3f}")
