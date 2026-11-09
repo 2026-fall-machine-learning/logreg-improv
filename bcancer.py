@@ -61,43 +61,77 @@ results["logreg_baseline"] = evaluate_and_log(
     LogisticRegression(max_iter=5000),
 )
 
-# --- Decision trees, each exploring a different hyperparameter -------------
+# --- Decision trees: realistic hyperparameter combos --------------------
+# In practice you rarely tune one hyperparameter in isolation - you combine
+# a few that each fight overfitting in a different way. Each config below
+# is a plausible "real" setting, not just a single-knob demo.
+tree_configs = {
+    # A conservative, shallow tree: low max_depth *and* a minimum leaf size
+    # together keep the tree simple on two fronts at once. Good baseline
+    # for "will a simple tree do?" before reaching for anything fancier.
+    "tree_shallow_regularized": dict(
+        max_depth=3,
+        min_samples_leaf=10,
+        criterion="gini",
+    ),
+    # A moderate-depth tree with both min_samples_split (how many samples
+    # a node needs before it's even considered for splitting) and
+    # min_samples_leaf (how many samples each resulting leaf must keep).
+    # Using both together is a common way to prevent the tree from
+    # carving out tiny, noise-driven leaves while still letting it grow
+    # deep enough to find real structure.
+    "tree_moderate_depth": dict(
+        max_depth=5,
+        min_samples_split=10,
+        min_samples_leaf=4,
+        criterion="gini",
+    ),
+    # A deeper tree using "entropy" (information gain) instead of the
+    # default "gini" impurity, paired with a leaf-size floor so the extra
+    # depth doesn't just memorize outliers.
+    "tree_deep_entropy": dict(
+        max_depth=8,
+        min_samples_leaf=8,
+        criterion="entropy",
+    ),
+    # No depth cap at all - instead we lean entirely on sample-count
+    # constraints (min_samples_split / min_samples_leaf) to control
+    # complexity. This is a different philosophy than capping max_depth:
+    # it lets the tree go as deep as it needs in "easy" regions of the
+    # data, while still refusing to split on just a handful of points.
+    "tree_unrestricted_depth_sample_regularized": dict(
+        max_depth=None,
+        min_samples_split=20,
+        min_samples_leaf=10,
+        criterion="gini",
+    ),
+    # Cost-complexity pruning (ccp_alpha): grow the tree fully, then prune
+    # back any branch whose added accuracy doesn't justify its added
+    # complexity, weighted by ccp_alpha. Higher ccp_alpha -> more
+    # aggressive pruning -> simpler tree. This is a *post*-hoc technique,
+    # distinct from pre-stopping rules like max_depth or min_samples_leaf.
+    "tree_ccp_pruned": dict(
+        max_depth=None,
+        ccp_alpha=0.01,
+    ),
+    # max_features restricts each split to consider only a random subset
+    # of features (here, sqrt(n_features)) rather than all of them. This
+    # injects randomness per split - the same idea random forests build
+    # on - which can reduce overfitting at the cost of a possibly weaker
+    # single tree.
+    "tree_feature_subsampling": dict(
+        max_depth=6,
+        max_features="sqrt",
+        min_samples_leaf=5,
+        criterion="entropy",
+    ),
+}
 
-# 1) max_depth caps how many yes/no questions ("splits") the tree can ask
-#    before making a decision. A shallow tree (depth=3) is simple and
-#    resists overfitting ("high bias"), but may be too simple to capture
-#    real patterns in the data.
-results["tree_max_depth_3"] = evaluate_and_log(
-    "tree_max_depth_3",
-    DecisionTreeClassifier(max_depth=3, random_state=42),
-)
-
-# 2) max_depth=None (the default) lets the tree grow until every leaf is
-#    pure or has fewer than 2 samples. This usually fits the training data
-#    almost perfectly ("low bias") but risks overfitting noise in the
-#    training set ("high variance") -> worse generalization to new data.
-results["tree_unrestricted"] = evaluate_and_log(
-    "tree_unrestricted",
-    DecisionTreeClassifier(max_depth=None, random_state=42),
-)
-
-# 3) min_samples_leaf requires every leaf to contain at least N training
-#    examples. Combined with a moderate max_depth, this is a common way to
-#    fight overfitting without hard-capping the tree's depth.
-results["tree_min_samples_leaf_5"] = evaluate_and_log(
-    "tree_min_samples_leaf_5",
-    DecisionTreeClassifier(max_depth=5, min_samples_leaf=5, random_state=42),
-)
-
-# 4) criterion controls the impurity measure used to score each candidate
-#    split: "gini" (default) vs. "entropy" (information gain). They usually
-#    produce similar trees but can diverge on some datasets. min_samples_split
-#    requires at least N samples at a node before it's even considered for
-#    splitting (a coarser cousin of min_samples_leaf).
-results["tree_entropy_min_split_20"] = evaluate_and_log(
-    "tree_entropy_min_split_20",
-    DecisionTreeClassifier(criterion="entropy", min_samples_split=20, random_state=42),
-)
+for name, params in tree_configs.items():
+    results[name] = evaluate_and_log(
+        name,
+        DecisionTreeClassifier(random_state=42, **params),
+    )
 
 # --- Pick the best model (by test accuracy) for the serving app ------------
 best_name, (best_acc, best_model) = max(results.items(), key=lambda kv: kv[1][0])
