@@ -6,6 +6,7 @@ import mlflow.sklearn
 from sklearn.datasets import load_breast_cancer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.tree import DecisionTreeClassifier
 
@@ -126,6 +127,160 @@ results.append(
             random_state=42, max_depth=5, class_weight="balanced"
         ),
         {"max_depth": 5, "class_weight": "balanced"},
+    )
+)
+
+# --- Random forest: a grid search over a bagged ensemble of trees ---
+# A random forest trains many decision trees, each on a bootstrapped
+# (random-with-replacement) sample of the rows and a random subset of
+# features per split, then averages/votes their predictions. That extra
+# randomness is what usually lets forests beat a single tree - individual
+# trees overfit in different ways, and averaging cancels much of that out.
+# It has all the same tree hyperparameters (max_depth, min_samples_leaf,
+# criterion, ...) plus a few more of its own:
+forest_param_grid = {
+    # n_estimators: how many trees to grow in the forest. More trees
+    # generally keeps helping (less variance from averaging) but with
+    # diminishing returns and higher training/prediction cost.
+    "n_estimators": [100, 300],
+    # max_depth: same as for a single tree, but here it caps every tree in
+    # the forest. None lets each tree grow fully; forests resist
+    # overfitting better than lone deep trees because of the averaging.
+    "max_depth": [5, 10, None],
+    # max_features: how many features are considered at each split.
+    # "sqrt" (= sqrt(30) ~ 5 features here) is the forest default and is
+    # what decorrelates the trees from each other; "log2" considers even
+    # fewer. Smaller values -> more diverse trees, possibly less accurate
+    # individually, but potentially a better ensemble.
+    "max_features": ["sqrt", "log2"],
+}
+
+forest_param_combos = [
+    dict(zip(forest_param_grid.keys(), values))
+    for values in itertools.product(*forest_param_grid.values())
+]
+
+
+def forest_run_name(params: dict) -> str:
+    depth = params["max_depth"] if params["max_depth"] is not None else "none"
+    return f"forest_n={params['n_estimators']}_depth={depth}_feat={params['max_features']}"
+
+
+for params in forest_param_combos:
+    results.append(
+        run_experiment(
+            forest_run_name(params),
+            RandomForestClassifier(random_state=42, n_jobs=-1, **params),
+            params,
+        )
+    )
+
+# --- A couple of extra, less commonly-grid-searched forest hyperparameters ---
+results.append(
+    run_experiment(
+        "forest_bootstrap-false",
+        # bootstrap=False: trains every tree on the *entire* training set
+        # (no resampling) instead of a bootstrap sample. Each tree still
+        # differs via random feature subsets at each split, but the
+        # ensemble loses some of its diversity - usually a slight
+        # accuracy/variance trade-off versus the default bootstrap=True.
+        RandomForestClassifier(
+            random_state=42, n_jobs=-1, n_estimators=300, bootstrap=False
+        ),
+        {"n_estimators": 300, "bootstrap": False},
+    )
+)
+results.append(
+    run_experiment(
+        "forest_class_weight-balanced",
+        # class_weight="balanced": same idea as for the single tree -
+        # reweights classes inversely to frequency, to counter the mild
+        # benign/malignant imbalance in this dataset.
+        RandomForestClassifier(
+            random_state=42,
+            n_jobs=-1,
+            n_estimators=300,
+            max_depth=10,
+            class_weight="balanced",
+        ),
+        {"n_estimators": 300, "max_depth": 10, "class_weight": "balanced"},
+    )
+)
+
+# --- Gradient boosting: trees built sequentially, not in parallel ---
+# Unlike a forest (many independent trees averaged/voted together),
+# boosting builds trees one at a time, where each new (shallow) tree is
+# trained to correct the errors (residuals) of the ensemble so far,
+# scaled down by `learning_rate` before being added in. It's a different
+# bias/variance strategy: many weak learners added incrementally, versus
+# many strong-ish learners averaged.
+boost_param_grid = {
+    # n_estimators: how many boosting stages (trees) to add in sequence.
+    # Unlike a forest, too many stages *can* overfit - boosting keeps
+    # chasing residuals even after test performance has plateaued.
+    "n_estimators": [100, 300],
+    # learning_rate: how much each new tree's correction counts (shrinks
+    # its contribution). Lower rates need more estimators to converge but
+    # generalize better; it trades off directly against n_estimators.
+    "learning_rate": [0.01, 0.1, 0.3],
+    # max_depth: boosting trees are usually kept shallow (stumps to a
+    # handful of levels) since they're each only meant to be a "weak
+    # learner" nudging the ensemble - unlike the deep trees that can work
+    # fine in a forest.
+    "max_depth": [2, 3],
+}
+
+boost_param_combos = [
+    dict(zip(boost_param_grid.keys(), values))
+    for values in itertools.product(*boost_param_grid.values())
+]
+
+
+def boost_run_name(params: dict) -> str:
+    return (
+        f"boost_n={params['n_estimators']}"
+        f"_lr={params['learning_rate']}"
+        f"_depth={params['max_depth']}"
+    )
+
+
+for params in boost_param_combos:
+    results.append(
+        run_experiment(
+            boost_run_name(params),
+            GradientBoostingClassifier(random_state=42, **params),
+            params,
+        )
+    )
+
+# --- A couple of extra, less commonly-grid-searched boosting hyperparameters ---
+results.append(
+    run_experiment(
+        "boost_subsample-0.8",
+        # subsample < 1.0 turns this into *stochastic* gradient boosting:
+        # each tree trains on a random fraction of the rows (like a
+        # forest's bootstrap, but without replacement). Adds randomness
+        # that can reduce overfitting and speed up training.
+        GradientBoostingClassifier(
+            random_state=42, n_estimators=200, learning_rate=0.1, subsample=0.8
+        ),
+        {"n_estimators": 200, "learning_rate": 0.1, "subsample": 0.8},
+    )
+)
+results.append(
+    run_experiment(
+        "boost_min_samples_leaf-10",
+        # min_samples_leaf: same meaning as for a single tree - applied to
+        # each of the (shallow) trees boosting builds. Raising it keeps
+        # the individual weak learners from latching onto tiny, noisy
+        # groups of residuals.
+        GradientBoostingClassifier(
+            random_state=42,
+            n_estimators=200,
+            learning_rate=0.1,
+            min_samples_leaf=10,
+        ),
+        {"n_estimators": 200, "learning_rate": 0.1, "min_samples_leaf": 10},
     )
 )
 
